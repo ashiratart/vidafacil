@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-
-import csv
 import os
+import openpyxl as px
 
-Notas = "notasmes.csv"
+Notas = "test.xlsx"
 
 def inicializar_arquivo():
     if not os.path.exists(Notas):
@@ -11,25 +10,41 @@ def inicializar_arquivo():
         exit(1)
 
 def ler():
-    print("\nLista de registros encontrados no CSV:\n")
-    with open(Notas, newline='', encoding="utf-8") as l:
-        reader = csv.DictReader(l)
-        for i, linha in enumerate(reader, start=1):
-            print(f"{i} | {linha['Apelido']} | {linha['Codigo']}")
+    print("\nLista de registros encontrados no XLSX:\n")
+    Base = px.load_workbook(Notas, data_only=True)
+    planilha = Base.active
+
+    headers = [cell.value for cell in planilha[1]]
+    apelido_idx = headers.index('Apelido')
+    codigo_idx = headers.index('chave')
+    descricao_idx = headers.index('Descritivo Pagamento:')
+
+    for i, row in enumerate(planilha.iter_rows(min_row=2, values_only=True), start=1):
+        apelido = row[apelido_idx]
+        codigo = row[codigo_idx]
+        descricao = row[descricao_idx]
+        if apelido and codigo and descricao:
+            print(f"{i} | {apelido} | {codigo} | {descricao}")
+        else:
+            print(f"{i} | Dados incompletos na linha {i}")
 
 def verificar_pdfs_existentes(pasta_pdfs="."):
-    apelidos_csv = set()
+    apelidos_xlsx = set()
 
-    # Lê todos os apelidos do CSV
-    with open(Notas, newline='', encoding="utf-8") as l:
-        reader = csv.DictReader(l)
-        for linha in reader:
-            apelido = linha.get('Apelido', '').strip().lower()
-            if apelido:
-                apelidos_csv.add(apelido)
+    # Lê todos os apelidos da planilha XLSX
+    Base = px.load_workbook(Notas, data_only=True)
+    planilha = Base.active
 
-    if not apelidos_csv:
-        print("⚠️ Nenhum apelido encontrado no CSV.")
+    headers = [cell.value for cell in planilha[1]]
+    apelido_idx = headers.index('Apelido')
+
+    for row in planilha.iter_rows(min_row=2, values_only=True):
+        apelido = row[apelido_idx]
+        if apelido:
+            apelidos_xlsx.add(str(apelido).strip().lower())
+
+    if not apelidos_xlsx:
+        print("⚠️ Nenhum apelido encontrado na planilha.")
         return False
 
     # Lista arquivos PDF na pasta
@@ -42,7 +57,7 @@ def verificar_pdfs_existentes(pasta_pdfs="."):
         for f in arquivos_pdf
     )
 
-    faltando = apelidos_csv - nomes_pdfs
+    faltando = apelidos_xlsx - nomes_pdfs
 
     if faltando:
         print("\n❌ Os seguintes apelidos não possuem PDF correspondente:")
