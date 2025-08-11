@@ -3,7 +3,7 @@ import imaplib
 # Configurações
 IMAP_SERVER = "imap.gmail.com"
 EMAIL_ACCOUNT = "acaciomarianosilvadebrito@gmail.com"
-EMAIL_PASSWORD = "adgfxigpjyelqwio"
+EMAIL_PASSWORD = "test"
 
 def test_connection():
     try:
