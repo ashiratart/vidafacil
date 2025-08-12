@@ -1,20 +1,20 @@
 import os
+import re
 import pytesseract
 from pdf2image import convert_from_path
-import re
-from openpyxl import Workbook
-from openpyxl.styles import Font
 from datetime import datetime
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 
-# Configurações globais
+# Configuração Tesseract
 tesseract_config = '--psm 6'
 tesseract_lang = 'por'
 
-# Definições de documentos
+# Palavras-chave para detecção
 DEFINIR_NF = {"Prefeitura", "Nota Fiscal", "Nota de Serviço", "Recibo"}
 DEFINIR_BOLETO = {"Linha Digitável", "Código de Barras", "Agência/Código do Beneficiário", "Linha Digitavel", "Agência", "Código do Beneficiário"}
 
-
+# Campos por tipo
 CAMPOS_BOLETO = {
     "Nº do Documento": r"\d+",
     "Vencimento": r"\d{2}/\d{2}/\d{4}",
@@ -28,12 +28,19 @@ CAMPOS_NF = {
     "Valor Total da Nota": r"R?\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}"
 }
 
+# Detectar tipo do documento
+def detectar_tipo_documento(texto_continuo):
+    texto_lower = texto_continuo.lower()
+    if any(p.lower() in texto_lower for p in DEFINIR_BOLETO):
+        return "BOLETO"
+    if any(p.lower() in texto_lower for p in DEFINIR_NF):
+        return "NF"
+    return "BOLETO"
+
+# Renomear arquivo
 def renomear_pdf(caminho, tipo):
-    """Renomeia o arquivo PDF com base no tipo detectado"""
     pasta, nome_arquivo = os.path.split(caminho)
     nome, ext = os.path.splitext(nome_arquivo)
-    
-    # Verifica se já não está renomeado
     if not nome.endswith(f"_{tipo}"):
         novo_nome = f"{nome}_{tipo}{ext}"
         novo_caminho = os.path.join(pasta, novo_nome)
@@ -42,172 +49,136 @@ def renomear_pdf(caminho, tipo):
         return novo_caminho
     return caminho
 
-def detectar_tipo_documento(texto_continuo):
-    """Detecta se o documento é NF ou Boleto"""
-    texto_lower = texto_continuo.lower()
-    if any(p.lower() in texto_lower for p in DEFINIR_BOLETO):
-        return "BOLETO"
-    if any(p.lower() in texto_lower for p in DEFINIR_NF):
-        return "NF"
-    return "BOLETO"
-
+# Extrair campos
 def extrair_campos(texto_continuo, campos):
-    """Extrai os campos específicos do texto usando expressões regulares"""
     encontrados = {}
     for chave, padrao_base in campos.items():
-        # Procura primeiro pela chave no texto
         if re.search(re.escape(chave), texto_continuo, re.IGNORECASE):
             padrao = re.search(
-                rf"{re.escape(chave)}.*?({padrao_base})", 
-                texto_continuo, 
-                re.IGNORECASE | re.DOTALL
+                rf"{re.escape(chave)}(?:\s+\S+){{0,5}}?\s+({padrao_base})",
+                texto_continuo,
+                re.IGNORECASE
             )
             encontrados[chave] = padrao.group(1).strip() if padrao else "Não encontrado"
     return encontrados
 
+# Carregar registros já existentes no Excel
+def carregar_registros_existentes(arquivo_excel):
+    registros = set()
+    if os.path.exists(arquivo_excel):
+        try:
+            wb = load_workbook(arquivo_excel)
+            ws = wb.active
+            headers = {cell.value: idx for idx, cell in enumerate(ws[1])}
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                num_doc = None
+                data_doc = None
+                for col_name in ["Nº do Documento", "Número da Nota"]:
+                    if col_name in headers:
+                        num_doc = row[headers[col_name]]
+                        if num_doc:
+                            break
+                for col_name in ["Data de Emissão", "Data e Hora de Emissão", "Vencimento"]:
+                    if col_name in headers:
+                        data_doc = row[headers[col_name]]
+                        if data_doc:
+                            break
+                if num_doc and data_doc:
+                    registros.add((str(num_doc).strip(), str(data_doc).strip()))
+        except Exception as e:
+            print(f"⚠️ Erro ao ler Excel existente: {e}")
+    return registros
+
+# Processar PDF individual
 def processar_pdf(pdf_path):
-    """
-    Processa um único PDF para classificação e extração de dados
-    Retorna um dicionário com os resultados
-    """
-    print(f"\n🔍 Processando o arquivo: {os.path.basename(pdf_path)}...")
+    print(f"\n🔍 Processando: {os.path.basename(pdf_path)}...")
     resultado = {
-        'Arquivo Original': os.path.basename(pdf_path),
-        'Arquivo Renomeado': '',
-        'Tipo': '',
-        'Campos': {}
+        "Arquivo Original": os.path.basename(pdf_path),
+        "Arquivo Renomeado": "",
+        "Tipo": "",
+        "Campos": {}
     }
-    
     try:
         imagens = convert_from_path(pdf_path)
         tipo_documento = None
         campos_referencia = {}
-        
-        # Processa apenas as primeiras 2 páginas para performance
-        for i, imagem in enumerate(imagens[:2]):
+        for i, imagem in enumerate(imagens[:2]):  # só primeiras 2 páginas
             texto = pytesseract.image_to_string(imagem, config=tesseract_config, lang=tesseract_lang)
             texto_continuo = " ".join(texto.split())
-            
             if tipo_documento is None:
                 tipo_documento = detectar_tipo_documento(texto_continuo)
-                resultado['Tipo'] = tipo_documento
+                resultado["Tipo"] = tipo_documento
                 campos_referencia = CAMPOS_NF if tipo_documento == "NF" else CAMPOS_BOLETO
-                
-                # Renomeia o arquivo
                 novo_caminho = renomear_pdf(pdf_path, tipo_documento)
-                resultado['Arquivo Renomeado'] = os.path.basename(novo_caminho)
-            
-            # Extrai campos apenas na primeira página
+                resultado["Arquivo Renomeado"] = os.path.basename(novo_caminho)
             if i == 0:
                 campos_encontrados = extrair_campos(texto_continuo, campos_referencia)
-                resultado['Campos'].update(campos_encontrados)
-        
-        print(f"✅ Processado: {resultado['Tipo']}")
-        print(f"   Campos encontrados: {', '.join([f'{k}: {v}' for k, v in resultado['Campos'].items()])}")
+                resultado["Campos"].update(campos_encontrados)
         return resultado
-        
     except Exception as e:
-        print(f"❌ Erro ao processar {pdf_path}: {str(e)}")
-        resultado['Tipo'] = f"ERRO: {str(e)}"
+        print(f"❌ Erro ao processar {pdf_path}: {e}")
+        resultado["Tipo"] = f"ERRO: {e}"
         return resultado
 
-def exportar_para_excel(resultados, pasta_saida):
-    """Exporta os resultados para um arquivo Excel"""
-    if not resultados:
-        print("⚠️ Nenhum resultado para exportar!")
-        return
-    
-    # Cria o workbook e a planilha
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Resultados PDF"
-    
-    # Cabeçalhos
-    cabecalhos = ['Arquivo Original', 'Arquivo Renomeado', 'Tipo']
-    campos_unicos = set()
-    
-    for res in resultados:
-        campos_unicos.update(res['Campos'].keys())
-    
-    cabecalhos.extend(sorted(campos_unicos))
-    ws.append(cabecalhos)
-    
-    # Estilo do cabeçalho
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-    
-    # Dados
+# Exportar para Excel
+def exportar_para_excel(resultados, pasta_saida, nome_arquivo):
+    excel_path = os.path.join(pasta_saida, nome_arquivo)
+    if os.path.exists(excel_path):
+        wb = load_workbook(excel_path)
+        ws = wb.active
+        cabecalhos = [cell.value for cell in ws[1]]
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Resultados PDF"
+        cabecalhos = ["Arquivo Original", "Arquivo Renomeado", "Tipo"]
+        campos_unicos = set()
+        for res in resultados:
+            campos_unicos.update(res["Campos"].keys())
+        cabecalhos.extend(sorted(campos_unicos))
+        ws.append(cabecalhos)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
     for res in resultados:
         linha = [
-            res['Arquivo Original'],
-            res.get('Arquivo Renomeado', ''),
-            res['Tipo']
+            res["Arquivo Original"],
+            res.get("Arquivo Renomeado", ""),
+            res["Tipo"]
         ]
         for campo in cabecalhos[3:]:
-            linha.append(res['Campos'].get(campo, "Não encontrado"))
+            linha.append(res["Campos"].get(campo, "Não encontrado"))
         ws.append(linha)
-    
-    # Ajusta largura das colunas
-    for column in ws.columns:
-        max_length = 0
-        column_letter = column[0].column_letter
-        for cell in column:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2) * 1.2
-        ws.column_dimensions[column_letter].width = adjusted_width
-    
-    # Nome do arquivo com timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_path = os.path.join(pasta_saida, f"resultados_pdfs_{timestamp}.xlsx")
     wb.save(excel_path)
-    print(f"\n📊 Resultados exportados para: {excel_path}")
-    return excel_path
+    print(f"📊 Resultados exportados para: {excel_path}")
 
-def processar_pasta(pasta_entrada, pasta_saida=None):
-    """Processa todos os PDFs em uma pasta e exporta para Excel"""
-    if pasta_saida is None:
-        pasta_saida = pasta_entrada
-    
-    # Verifica se a pasta existe
-    if not os.path.exists(pasta_entrada):
-        print(f"❌ Pasta de entrada não encontrada: {pasta_entrada}")
-        return
-    
+# Processar pasta inteira
+def processar_pasta(pasta_entrada, pasta_saida):
     if not os.path.exists(pasta_saida):
         os.makedirs(pasta_saida)
-    
-    # Lista todos os PDFs na pasta
-    pdfs = [f for f in os.listdir(pasta_entrada) if f.lower().endswith('.pdf')]
-    if not pdfs:
-        print(f"❌ Nenhum arquivo PDF encontrado em: {pasta_entrada}")
-        return
-    
-    print(f"\n📂 Encontrados {len(pdfs)} arquivos PDF para processar...")
-    
-    # Processa cada PDF
+    excel_controle = os.path.join(pasta_saida, "resultados_pdfs.xlsx")
+    registros_existentes = carregar_registros_existentes(excel_controle)
+    pdfs = [f for f in os.listdir(pasta_entrada) if f.lower().endswith(".pdf")]
     resultados = []
     for pdf in pdfs:
         pdf_path = os.path.join(pasta_entrada, pdf)
-        resultados.append(processar_pdf(pdf_path))
-    
-    excel_path = exportar_para_excel(resultados, pasta_saida)
-    return excel_path
+        res = processar_pdf(pdf_path)
+        num_doc = res["Campos"].get("Nº do Documento") or res["Campos"].get("Número da Nota")
+        data_doc = res["Campos"].get("Data de Emissão") or res["Campos"].get("Data e Hora de Emissão") or res["Campos"].get("Vencimento")
+        if num_doc and data_doc and (str(num_doc).strip(), str(data_doc).strip()) in registros_existentes:
+            print(f"⏭️ Pulando {pdf} — já processado anteriormente.")
+            continue
+        resultados.append(res)
+    if resultados:
+        exportar_para_excel(resultados, pasta_saida, "resultados_pdfs.xlsx")
+    else:
+        print("⚠️ Nenhum PDF novo para exportar.")
 
 if __name__ == "__main__":
-    PASTA_PDFS = "automatizar/BOLETOS"  
-    PASTA_SAIDA = "automatizar/Exel"  
-    
-    # Verifica se o Tesseract está instalado
+    PASTA_PDFS = "automatizar/BOLETOS"
+    PASTA_SAIDA = "automatizar/Exel"
     try:
         pytesseract.get_tesseract_version()
     except:
-        print("❌ Tesseract OCR não está instalado ou não está no PATH")
-        print("👉 Instale conforme o sistema operacional e adicione ao PATH")
+        print("❌ Tesseract OCR não está instalado ou não está no PATH.")
         exit()
-    
-    # Executa o processamento
     processar_pasta(PASTA_PDFS, PASTA_SAIDA)

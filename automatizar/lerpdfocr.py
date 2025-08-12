@@ -3,11 +3,21 @@ import pytesseract
 from pdf2image import convert_from_path
 import re
 
+# 🔹 Deep Learning (opcional) – carrega só se existir
+try:
+    from transformers import pipeline
+    DL_MODE = True
+    # Troque o caminho do modelo abaixo pelo que você treinar
+    classificador = pipeline("text-classification", model="./modelo_classificador")
+except ImportError:
+    DL_MODE = False
+    classificador = None
+
 # Configurações globais
 tesseract_config = '--psm 6'
 tesseract_lang = 'por'
 
-# Definições de documentos
+# Definições de documentos (fallback)
 DEFINIR_NF = {"Prefeitura", "Nota Fiscal", "Nota de Serviço", "Recibo"}
 DEFINIR_BOLETO = {"Linha Digitável", "Código de Barras", "Agência/Código do Beneficiário", "Linha Digitavel", "Agência", "Código do Beneficiário"}
 
@@ -24,8 +34,18 @@ CAMPOS_NF = {
     "Valor Total da Nota": r"R?\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}"
 }
 
+# -------------------------
+# CLASSIFICAÇÃO DE DOCUMENTO
+# -------------------------
 def detectar_tipo_documento(texto_continuo):
-    """Detecta se o documento é NF ou Boleto"""
+    """Classifica documento usando DL se disponível, senão usa fallback"""
+    if DL_MODE and classificador:
+        resultado = classificador(texto_continuo[:512], truncation=True)  # corta para evitar texto enorme
+        tipo_predito = resultado[0]['label'].upper()
+        print(f"🤖 Classificação IA: {tipo_predito}")
+        return tipo_predito
+
+    # Fallback por palavras-chave
     texto_lower = texto_continuo.lower()
     if any(p.lower() in texto_lower for p in DEFINIR_BOLETO):
         return "BOLETO"
@@ -33,8 +53,10 @@ def detectar_tipo_documento(texto_continuo):
         return "NF"
     return "DESCONHECIDO"
 
+# -------------------------
+# RENOMEAR PDF
+# -------------------------
 def renomear_pdf(caminho, tipo):
-    """Renomeia o arquivo PDF com base no tipo detectado"""
     pasta, nome_arquivo = os.path.split(caminho)
     nome, ext = os.path.splitext(nome_arquivo)
     novo_nome = f"{nome}_{tipo}{ext}"
@@ -43,8 +65,10 @@ def renomear_pdf(caminho, tipo):
     print(f"📂 Arquivo renomeado para: {novo_nome}")
     return novo_caminho
 
+# -------------------------
+# EXTRAÇÃO POR REGEX (FALLBACK)
+# -------------------------
 def extrair_campos(texto_continuo, campos):
-    """Extrai os campos específicos do texto usando expressões regulares"""
     encontrados = {}
     for chave, padrao_base in campos.items():
         if chave.lower() in texto_continuo.lower():
@@ -56,12 +80,10 @@ def extrair_campos(texto_continuo, campos):
             encontrados[chave] = padrao.group(1) if padrao else None
     return encontrados
 
+# -------------------------
+# PROCESSAR PDF
+# -------------------------
 def processar_pdf(pdf_path, extrair_dados=False):
-    """
-    Processa o PDF para classificação e extração de dados
-    :param pdf_path: Caminho do arquivo PDF
-    :param extrair_dados: Se True, extrai campos específicos do documento
-    """
     print(f"\n🔍 Processando o PDF '{pdf_path}'...")
     imagens = convert_from_path(pdf_path)
     
@@ -73,14 +95,14 @@ def processar_pdf(pdf_path, extrair_dados=False):
         texto = pytesseract.image_to_string(imagem, config=tesseract_config, lang=tesseract_lang)
         texto_continuo = " ".join(texto.split())
         
-        # Detecta o tipo do documento na primeira página
+        # Detecta tipo na primeira página
         if tipo_documento is None:
             tipo_documento = detectar_tipo_documento(texto_continuo)
             print(f"📄 Documento detectado como: {tipo_documento}")
             campos_referencia = CAMPOS_NF if tipo_documento == "NF" else CAMPOS_BOLETO
             campos_encontrados = {campo: None for campo in campos_referencia}
         
-        # Se solicitado, extrai os campos específicos
+        # Extração de dados (regex por enquanto)
         if extrair_dados:
             novos_campos = extrair_campos(texto_continuo, campos_referencia)
             for campo, valor in novos_campos.items():
@@ -93,17 +115,16 @@ def processar_pdf(pdf_path, extrair_dados=False):
     
     novo_caminho = renomear_pdf(pdf_path, tipo_documento)
     
-    # Exibe resultados da extração, se solicitado
     if extrair_dados:
         print("\n📋 Resultados finais:")
         for campo, valor in campos_encontrados.items():
-            if valor:
-                print(f"{campo}: {valor}")
-            else:
-                print(f"{campo}: ❌ não encontrado")
+            print(f"{campo}: {valor if valor else '❌ não encontrado'}")
     
     return novo_caminho, tipo_documento, campos_encontrados if extrair_dados else None
 
+# -------------------------
+# EXECUÇÃO
+# -------------------------
 if __name__ == "__main__":
     caminho_completo = "automatizar/04-10.pdf"
     processar_pdf(caminho_completo, extrair_dados=True)
