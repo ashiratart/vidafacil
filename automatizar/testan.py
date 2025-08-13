@@ -1,184 +1,91 @@
 import os
 import re
+import pandas as pd
 import pytesseract
 from pdf2image import convert_from_path
-from datetime import datetime
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font
+from tqdm import tqdm
+from PIL import Image, ImageEnhance, ImageFilter
 
-# Configuração Tesseract
+# ===============================
+# Configuração do OCR
+# ===============================
 tesseract_config = '--psm 6'
 tesseract_lang = 'por'
 
-# Palavras-chave para detecção
+# Palavras-chave para detecção de tipo
 DEFINIR_NF = {"Prefeitura", "Nota Fiscal", "Nota de Serviço", "Recibo"}
-DEFINIR_BOLETO = {"Linha Digitável", "Código de Barras", "Agência/Código do Beneficiário", "Linha Digitavel", "Agência", "Código do Beneficiário"}
+DEFINIR_BOLETO = {"Linha Digitável", "Código de Barras", "Agência/Código do Beneficiário", "Agência", "Código do Beneficiário"}
 
-# Campos por tipo
-CAMPOS_BOLETO = {
-    "Nº do Documento": r"\d+",
-    "Vencimento": r"\d{2}/\d{2}/\d{4}",
-    "Valor do Documento": r"\d{1,3}(?:\.\d{3})*,\d{2}"
-}
+# ===============================
+# Funções auxiliares
+# ===============================
+def preprocessar_imagem(img):
+    """Melhora contraste e nitidez para OCR."""
+    img = img.convert("L")  # escala de cinza
+    img = img.filter(ImageFilter.MedianFilter())  # remove ruído
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(2)  # aumenta contraste
+    return img
 
-CAMPOS_NF = {
-    "Número da Nota": r"\d+",
-    "Data de Emissão": r"\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?",
-    "Data e Hora de Emissão": r"\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?",
-    "Valor Total da Nota": r"R?\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}"
-}
+def normalizar_texto(texto):
+    """Remove espaços extras e padroniza datas/valores."""
+    texto = " ".join(texto.split())  # remove múltiplos espaços
+    texto = re.sub(r"\d{2}/\d{2}/\d{4}", "<DATA>", texto)
+    texto = re.sub(r"\d{1,3}(?:\.\d{3})*,\d{2}", "<VALOR>", texto)
+    return texto
 
-# Detectar tipo do documento
-def detectar_tipo_documento(texto_continuo):
-    texto_lower = texto_continuo.lower()
+def detectar_tipo_documento(texto):
+    """Define rótulo do documento baseado no texto extraído."""
+    texto_lower = texto.lower()
     if any(p.lower() in texto_lower for p in DEFINIR_BOLETO):
         return "BOLETO"
     if any(p.lower() in texto_lower for p in DEFINIR_NF):
         return "NF"
-    return "BOLETO"
+    return "BOLETO"  # fallback
 
-# Renomear arquivo
-def renomear_pdf(caminho, tipo):
-    pasta, nome_arquivo = os.path.split(caminho)
-    nome, ext = os.path.splitext(nome_arquivo)
-    if not nome.endswith(f"_{tipo}"):
-        novo_nome = f"{nome}_{tipo}{ext}"
-        novo_caminho = os.path.join(pasta, novo_nome)
-        os.rename(caminho, novo_caminho)
-        print(f"📂 Arquivo renomeado para: {novo_nome}")
-        return novo_caminho
-    return caminho
+def extrair_texto_pdf(pdf_path):
+    """Extrai texto processando cada página do PDF."""
+    imagens = convert_from_path(pdf_path, dpi=300)
+    texto_final = []
+    for img in imagens:
+        img = preprocessar_imagem(img)
+        texto = pytesseract.image_to_string(img, config=tesseract_config, lang=tesseract_lang)
+        texto_final.append(normalizar_texto(texto))
+    return " ".join(texto_final)
 
-# Extrair campos
-def extrair_campos(texto_continuo, campos):
-    encontrados = {}
-    for chave, padrao_base in campos.items():
-        if re.search(re.escape(chave), texto_continuo, re.IGNORECASE):
-            padrao = re.search(
-                rf"{re.escape(chave)}(?:\s+\S+){{0,5}}?\s+({padrao_base})",
-                texto_continuo,
-                re.IGNORECASE
-            )
-            encontrados[chave] = padrao.group(1).strip() if padrao else "Não encontrado"
-    return encontrados
+# ===============================
+# Montagem do dataset
+# ===============================
+pasta_base = "automatizar/pdfs"
+csv_dataset = "dataset_classificacao.csv"
+dados = []
 
-# Carregar registros já existentes no Excel
-def carregar_registros_existentes(arquivo_excel):
-    registros = set()
-    if os.path.exists(arquivo_excel):
-        try:
-            wb = load_workbook(arquivo_excel)
-            ws = wb.active
-            headers = {cell.value: idx for idx, cell in enumerate(ws[1])}
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                num_doc = None
-                data_doc = None
-                for col_name in ["Nº do Documento", "Número da Nota"]:
-                    if col_name in headers:
-                        num_doc = row[headers[col_name]]
-                        if num_doc:
-                            break
-                for col_name in ["Data de Emissão", "Data e Hora de Emissão", "Vencimento"]:
-                    if col_name in headers:
-                        data_doc = row[headers[col_name]]
-                        if data_doc:
-                            break
-                if num_doc and data_doc:
-                    registros.add((str(num_doc).strip(), str(data_doc).strip()))
-        except Exception as e:
-            print(f"⚠️ Erro ao ler Excel existente: {e}")
-    return registros
+# Carregar dataset existente para evitar duplicatas
+if os.path.exists(csv_dataset):
+    df_existente = pd.read_csv(csv_dataset)
+    registros_existentes = set(zip(df_existente["texto"], df_existente["label"]))
+else:
+    registros_existentes = set()
 
-# Processar PDF individual
-def processar_pdf(pdf_path):
-    print(f"\n🔍 Processando: {os.path.basename(pdf_path)}...")
-    resultado = {
-        "Arquivo Original": os.path.basename(pdf_path),
-        "Arquivo Renomeado": "",
-        "Tipo": "",
-        "Campos": {}
-    }
-    try:
-        imagens = convert_from_path(pdf_path)
-        tipo_documento = None
-        campos_referencia = {}
-        for i, imagem in enumerate(imagens[:2]):  # só primeiras 2 páginas
-            texto = pytesseract.image_to_string(imagem, config=tesseract_config, lang=tesseract_lang)
-            texto_continuo = " ".join(texto.split())
-            if tipo_documento is None:
-                tipo_documento = detectar_tipo_documento(texto_continuo)
-                resultado["Tipo"] = tipo_documento
-                campos_referencia = CAMPOS_NF if tipo_documento == "NF" else CAMPOS_BOLETO
-                novo_caminho = renomear_pdf(pdf_path, tipo_documento)
-                resultado["Arquivo Renomeado"] = os.path.basename(novo_caminho)
-            if i == 0:
-                campos_encontrados = extrair_campos(texto_continuo, campos_referencia)
-                resultado["Campos"].update(campos_encontrados)
-        return resultado
-    except Exception as e:
-        print(f"❌ Erro ao processar {pdf_path}: {e}")
-        resultado["Tipo"] = f"ERRO: {e}"
-        return resultado
+# Ler PDFs e extrair dados
+for pasta_raiz, _, arquivos in os.walk(pasta_base):
+    for arq in tqdm(arquivos, desc=f"Lendo PDFs"):
+        if arq.lower().endswith(".pdf"):
+            caminho_pdf = os.path.join(pasta_raiz, arq)
+            texto = extrair_texto_pdf(caminho_pdf)
+            label = detectar_tipo_documento(texto)
 
-# Exportar para Excel
-def exportar_para_excel(resultados, pasta_saida, nome_arquivo):
-    excel_path = os.path.join(pasta_saida, nome_arquivo)
-    if os.path.exists(excel_path):
-        wb = load_workbook(excel_path)
-        ws = wb.active
-        cabecalhos = [cell.value for cell in ws[1]]
+            if (texto, label) not in registros_existentes:
+                dados.append({"texto": texto, "label": label})
+
+# Salvar dataset atualizado
+if dados:
+    df_novo = pd.DataFrame(dados)
+    if os.path.exists(csv_dataset):
+        df_final = pd.concat([df_existente, df_novo], ignore_index=True)
     else:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Resultados PDF"
-        cabecalhos = ["Arquivo Original", "Arquivo Renomeado", "Tipo"]
-        campos_unicos = set()
-        for res in resultados:
-            campos_unicos.update(res["Campos"].keys())
-        cabecalhos.extend(sorted(campos_unicos))
-        ws.append(cabecalhos)
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-    for res in resultados:
-        linha = [
-            res["Arquivo Original"],
-            res.get("Arquivo Renomeado", ""),
-            res["Tipo"]
-        ]
-        for campo in cabecalhos[3:]:
-            linha.append(res["Campos"].get(campo, "Não encontrado"))
-        ws.append(linha)
-    wb.save(excel_path)
-    print(f"📊 Resultados exportados para: {excel_path}")
-
-# Processar pasta inteira
-def processar_pasta(pasta_entrada, pasta_saida):
-    if not os.path.exists(pasta_saida):
-        os.makedirs(pasta_saida)
-    excel_controle = os.path.join(pasta_saida, "resultados_pdfs.xlsx")
-    registros_existentes = carregar_registros_existentes(excel_controle)
-    pdfs = [f for f in os.listdir(pasta_entrada) if f.lower().endswith(".pdf")]
-    resultados = []
-    for pdf in pdfs:
-        pdf_path = os.path.join(pasta_entrada, pdf)
-        res = processar_pdf(pdf_path)
-        num_doc = res["Campos"].get("Nº do Documento") or res["Campos"].get("Número da Nota")
-        data_doc = res["Campos"].get("Data de Emissão") or res["Campos"].get("Data e Hora de Emissão") or res["Campos"].get("Vencimento")
-        if num_doc and data_doc and (str(num_doc).strip(), str(data_doc).strip()) in registros_existentes:
-            print(f"⏭️ Pulando {pdf} — já processado anteriormente.")
-            continue
-        resultados.append(res)
-    if resultados:
-        exportar_para_excel(resultados, pasta_saida, "resultados_pdfs.xlsx")
-    else:
-        print("⚠️ Nenhum PDF novo para exportar.")
-
-if __name__ == "__main__":
-    PASTA_PDFS = "automatizar/BOLETOS"
-    PASTA_SAIDA = "automatizar/Exel"
-    try:
-        pytesseract.get_tesseract_version()
-    except:
-        print("❌ Tesseract OCR não está instalado ou não está no PATH.")
-        exit()
-    processar_pasta(PASTA_PDFS, PASTA_SAIDA)
+        df_final = df_novo
+    df_final.to_csv(csv_dataset, index=False)
+    print(f"✅ Dataset salvo/atualizado com {len(df_final)} registros.")
+else:
+    print("⚠️ Nenhum novo documento para adicionar ao dataset.")
