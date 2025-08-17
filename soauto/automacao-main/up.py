@@ -4,7 +4,7 @@ import re
 import json
 import pandas as pd
 from pdf2image import convert_from_path
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from datetime import datetime, timedelta
 
@@ -19,13 +19,13 @@ DEFINIR_NF = {"Prefeitura", "Nota Fiscal", "Nota de Serviço", "Recibo"}
 DEFINIR_BOLETO = {"Linha Digitável", "Código de Barras", "Agência/Código do Beneficiário", "Linha Digitavel", "Agência", "Código do Beneficiário"}
 
 CAMPOS_BOLETO = {
-    "Número do Documento": r"\d+",
+    "Número do Documento": r"\d{5,9}",
     "Vencimento": r"\d{2}/\d{2}/\d{4}",
     "Valor do Documento": r"\d{1,3}(?:\.\d{3})*,\d{2}"
 }
 
 CAMPOS_NF = {
-    "Número da Nota": r"\d+",
+    "Número da Nota": r"\d{4,9}",
     "Data de Emissão": r"\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?",
     "Data e Hora de Emissão": r"\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?",
     "Valor Total da Nota": r"R?\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}",
@@ -182,118 +182,13 @@ def processar_pdf(pdf_path):
         
         print(f"✅ Processado: {resultado['Tipo']}")
         print(f"   Campos encontrados: {', '.join([f'{k}: {v}' for k, v in resultado['Campos'].items()])}")
+        print(texto_continuo)
         return resultado
         
     except Exception as e:
         print(f"❌ Erro ao processar {pdf_path}: {str(e)}")
         resultado['Tipo'] = f"ERRO: {str(e)}"
         return resultado
-
-def exportar_para_excel(resultados, pasta_saida):
-    if not resultados:
-        print("⚠️ Nenhum resultado para exportar!")
-        return None
-    
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Resultados PDF"
-    
-    cabecalhos = ['Arquivo Original', 'Arquivo Renomeado', 'Tipo']
-    campos_unicos = set()
-    
-    for res in resultados:
-        campos_unicos.update(res['Campos'].keys())
-    
-    cabecalhos.extend(sorted(campos_unicos))
-    ws.append(cabecalhos)
-    
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-    
-    for res in resultados:
-        linha = [
-            res['Arquivo Original'],
-            res.get('Arquivo Renomeado', ''),
-            res['Tipo']
-        ]
-        for campo in cabecalhos[3:]:
-            linha.append(res['Campos'].get(campo, "Não encontrado"))
-        ws.append(linha)
-    
-    for column in ws.columns:
-        max_length = 0
-        column_letter = column[0].column_letter
-        for cell in column:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2) * 1.2
-        ws.column_dimensions[column_letter].width = adjusted_width
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_path = os.path.join(pasta_saida, f"resultados_pdfs_{timestamp}.xlsx")
-    wb.save(excel_path)
-    print(f"\n📊 Resultados exportados para: {excel_path}")
-    return excel_path
-
-def processar_pasta(pasta_entrada, pasta_saida=None):
-    if pasta_saida is None:
-        pasta_saida = pasta_entrada
-    
-    if not os.path.exists(pasta_entrada):
-        print(f"❌ Pasta de entrada não encontrada: {pasta_entrada}")
-        return
-    
-    if not os.path.exists(pasta_saida):
-        os.makedirs(pasta_saida)
-
-    caminho_historico = os.path.join(pasta_saida, "arquivos_processados.log")
-    limpar_log_antigo(caminho_historico)
-    historico_processados = ler_log(caminho_historico)
-
-    pdfs = [f for f in os.listdir(pasta_entrada) if f.lower().endswith('.pdf')]
-    if not pdfs:
-        print(f"❌ Nenhum arquivo PDF encontrado em: {pasta_entrada}")
-        return
-    
-    print(f"\n📂 Encontrados {len(pdfs)} arquivos PDF para processar...")
-    
-    resultados = []
-    for pdf in pdfs:
-        pdf_path = os.path.join(pasta_entrada, pdf)
-
-        # Processa sempre para extrair dados
-        resultado = processar_pdf(pdf_path)
-
-        # Se já existe no log com mesmos campos, pula exportação
-        if documento_ja_registrado(historico_processados, resultado['Tipo'], resultado['Campos']):
-            print(f"⏩ Documento já registrado no log, pulando exportação: {pdf}")
-            continue
-
-        if not resultado['Tipo'].startswith("ERRO") and resultado['Campos']:
-            adicionar_ao_historico(caminho_historico, resultado)
-            resultados.append(resultado)
-            
-    exportar_para_excel(resultados, pasta_saida)
-
-if __name__ == "__main__":
-    PASTA_PDFS = "automacao-main/Boletos"
-    PASTA_SAIDA = "automacao-main/Excel"
-    
-    try:
-        pytesseract.get_tesseract_version()
-    except:
-        print("❌ Tesseract OCR não está instalado ou não está no PATH")
-        exit()
-    
-    processar_pasta(PASTA_PDFS, PASTA_SAIDA)
-
-
-#adicinar pensamento depois
-
-from openpyxl import Workbook, load_workbook
 
 def exportar_para_excel(resultados, pasta_saida, nome_arquivo="resultados_pdfs.xlsx"):
     if not resultados:
@@ -352,3 +247,55 @@ def exportar_para_excel(resultados, pasta_saida, nome_arquivo="resultados_pdfs.x
     wb.save(excel_path)
     print(f"\n📊 Resultados adicionados em: {excel_path}")
     return excel_path
+
+def processar_pasta(pasta_entrada, pasta_saida=None):
+    if pasta_saida is None:
+        pasta_saida = pasta_entrada
+    
+    if not os.path.exists(pasta_entrada):
+        print(f"❌ Pasta de entrada não encontrada: {pasta_entrada}")
+        return
+    
+    if not os.path.exists(pasta_saida):
+        os.makedirs(pasta_saida)
+
+    caminho_historico = os.path.join(pasta_saida, "arquivos_processados.log")
+    limpar_log_antigo(caminho_historico)
+    historico_processados = ler_log(caminho_historico)
+
+    pdfs = [f for f in os.listdir(pasta_entrada) if f.lower().endswith('.pdf')]
+    if not pdfs:
+        print(f"❌ Nenhum arquivo PDF encontrado em: {pasta_entrada}")
+        return
+    
+    print(f"\n📂 Encontrados {len(pdfs)} arquivos PDF para processar...")
+    
+    resultados = []
+    for pdf in pdfs:
+        pdf_path = os.path.join(pasta_entrada, pdf)
+
+        # Processa sempre para extrair dados
+        resultado = processar_pdf(pdf_path)
+
+        # Se já existe no log com mesmos campos, pula exportação
+        if documento_ja_registrado(historico_processados, resultado['Tipo'], resultado['Campos']):
+            print(f"⏩ Documento já registrado no log, pulando exportação: {pdf}")
+            continue
+
+        if not resultado['Tipo'].startswith("ERRO") and resultado['Campos']:
+            adicionar_ao_historico(caminho_historico, resultado)
+            resultados.append(resultado)
+            
+    exportar_para_excel(resultados, pasta_saida)
+
+if __name__ == "__main__":
+    PASTA_PDFS = "soauto/automacao-main/Boletos"
+    PASTA_SAIDA = "soauto/automacao-main/Excel"
+    
+    try:
+        pytesseract.get_tesseract_version()
+    except:
+        print("❌ Tesseract OCR não está instalado ou não está no PATH")
+        exit()
+    
+    processar_pasta(PASTA_PDFS, PASTA_SAIDA)
